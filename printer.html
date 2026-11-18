@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Print Foto Thermal</title>
+<style>
+  :root{--bg:#f4f1ea;--card:#fff;--ink:#1c1b19;--mut:#6b675f;--acc:#1c1b19;--line:#e0dbd0}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+  .wrap{max-width:960px;margin:0 auto;padding:20px 16px 60px}
+  h1{font-size:22px;margin:0 0 4px}
+  p.sub{margin:0 0 20px;color:var(--mut);font-size:14px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:720px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .drop{border:2px dashed #bdb7a8;border-radius:12px;padding:28px 12px;text-align:center;cursor:pointer;color:var(--mut);transition:.15s}
+  .drop.over{background:#f0ece0;border-color:var(--ink)}
+  .drop b{color:var(--ink)}
+  label{display:block;font-size:13px;margin:14px 0 4px;color:var(--mut)}
+  select,input[type=range]{width:100%}
+  select{padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
+  button{flex:1;min-width:140px;padding:12px 14px;border-radius:10px;border:1px solid var(--ink);background:var(--acc);color:#fff;font-size:14px;font-weight:600;cursor:pointer}
+  button.sec{background:#fff;color:var(--ink)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  .preview{display:flex;justify-content:center;background:#e9e5da;border-radius:10px;padding:14px;min-height:200px}
+  .paper{background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.15);max-width:100%;overflow:auto}
+  canvas{display:block;image-rendering:pixelated;max-width:100%;height:auto}
+  .status{margin-top:12px;font-size:13px;color:var(--mut);min-height:18px}
+  .chk{display:flex;align-items:center;gap:8px;margin-top:14px;font-size:14px}
+  small{color:var(--mut)}
+  #printArea{display:none}
+  @media print{
+    @page{margin:0}
+    body{background:#fff}
+    .wrap{display:none}
+    #printArea{display:block}
+    #printArea img{display:block;width:100%;height:auto;image-rendering:pixelated}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Print Foto ke Thermal Printer</h1>
+  <p class="sub">Upload foto → otomatis jadi hitam-putih (dither) → klik cetak.</p>
+
+  <div class="grid">
+    <div class="card">
+      <div class="drop" id="drop">
+        <div><b>Klik / tarik foto ke sini</b></div>
+        <small>JPG, PNG, WebP</small>
+        <input type="file" id="file" accept="image/*" hidden>
+      </div>
+
+      <label>Lebar kertas</label>
+      <select id="width">
+        <option value="384">58 mm (384 px)</option>
+        <option value="576">80 mm (576 px)</option>
+        <option value="512">80 mm versi 512 px</option>
+      </select>
+
+      <label>Mode</label>
+      <select id="mode">
+        <option value="fs">Dither Floyd-Steinberg (foto)</option>
+        <option value="th">Threshold (teks / logo)</option>
+      </select>
+
+      <label>Kecerahan: <span id="bv">0</span></label>
+      <input type="range" id="bright" min="-100" max="100" value="0">
+      <label>Kontras: <span id="cv">0</span></label>
+      <input type="range" id="contrast" min="-100" max="100" value="0">
+      <label>Threshold: <span id="tv">128</span></label>
+      <input type="range" id="thresh" min="30" max="230" value="128">
+
+      <div class="chk"><input type="checkbox" id="invert"><span>Invert (hitam ↔ putih)</span></div>
+      <div class="chk"><input type="checkbox" id="rot"><span>Putar 90°</span></div>
+    </div>
+
+    <div class="card">
+      <div class="preview"><div class="paper"><canvas id="cv0" width="384" height="10"></canvas></div></div>
+      <div class="row">
+        <button id="btnPrint" disabled>🖨️ Cetak (dialog browser)</button>
+      </div>
+      <div class="row">
+        <button class="sec" id="btnBt" disabled>Bluetooth (ESC/POS)</button>
+        <button class="sec" id="btnUsb" disabled>USB (ESC/POS)</button>
+      </div>
+      <div class="status" id="status"></div>
+      <small>
+        <b>Cetak (dialog browser)</b>: paling mudah, pakai printer yang sudah terinstall di komputer.
+        <b>Bluetooth/USB</b>: kirim langsung ke printer (butuh Chrome/Edge, buka file ini lewat
+        <code>https://</code> atau <code>localhost</code>/file lokal).
+      </small>
+    </div>
+  </div>
+</div>
+<div id="printArea"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const cvs = $('cv0'), ctx = cvs.getContext('2d', {willReadFrequently:true});
+let srcImg = null, bits = null, W = 384, H = 0;
+let btChar = null, usbDev = null, usbEp = null;
+
+const setStatus = t => $('status').textContent = t;
+
+// --- upload ---
+$('drop').onclick = () => $('file').click();
+$('file').onchange = e => loadFile(e.target.files[0]);
+['dragenter','dragover'].forEach(ev => $('drop').addEventListener(ev, e => {e.preventDefault();$('drop').classList.add('over')}));
+['dragleave','drop'].forEach(ev => $('drop').addEventListener(ev, e => {e.preventDefault();$('drop').classList.remove('over')}));
+$('drop').addEventListener('drop', e => loadFile(e.dataTransfer.files[0]));
+window.addEventListener('paste', e => {
+  const f = [...(e.clipboardData?.files||[])][0]; if (f) loadFile(f);
+});
+
+function loadFile(f){
+  if(!f || !f.type.startsWith('image/')) return setStatus('File bukan gambar.');
+  const img = new Image();
+  img.onload = () => { srcImg = img; render(); ['btnPrint','btnBt','btnUsb'].forEach(i=>$(i).disabled=false); setStatus('Foto dimuat.'); };
+  img.src = URL.createObjectURL(f);
+}
+
+['width','mode','bright','contrast','thresh','invert','rot'].forEach(id => $(id).addEventListener('input', render));
+
+// --- render + dither ---
+function render(){
+  if(!srcImg) return;
+  $('bv').textContent = $('bright').value;
+  $('cv').textContent = $('contrast').value;
+  $('tv').textContent = $('thresh').value;
+
+  W = parseInt($('width').value);
+  const rot = $('rot').checked;
+  const sw = rot ? srcImg.height : srcImg.width;
+  const sh = rot ? srcImg.width : srcImg.height;
+  H = Math.max(1, Math.round(sh * W / sw));
+
+  cvs.width = W; cvs.height = H;
+  ctx.fillStyle = '#fff'; ctx.fillRect(0,0,W,H);
+  ctx.save();
+  if(rot){
+    ctx.translate(W/2, H/2); ctx.rotate(Math.PI/2);
+    ctx.drawImage(srcImg, -H/2, -W/2, H, W);
+  } else ctx.drawImage(srcImg, 0, 0, W, H);
+  ctx.restore();
+
+  const id = ctx.getImageData(0,0,W,H), d = id.data;
+  const br = +$('bright').value, ct = +$('contrast').value;
+  const f = (259*(ct+255))/(255*(259-ct));
+  const g = new Float32Array(W*H);
+  for(let i=0;i<W*H;i++){
+    let v = 0.299*d[i*4]+0.587*d[i*4+1]+0.114*d[i*4+2];
+    v = f*(v-128)+128+br;
+    g[i] = Math.max(0, Math.min(255, v));
+  }
+  const th = +$('thresh').value, fs = $('mode').value === 'fs', inv = $('invert').checked;
+  bits = new Uint8Array(W*H); // 1 = black
+  for(let y=0;y<H;y++){
+    for(let x=0;x<W;x++){
+      const i = y*W+x, old = g[i];
+      const nw = old < (fs ? 128 : th) ? 0 : 255;
+      if(fs){
+        const err = old - nw;
+        if(x+1<W) g[i+1] += err*7/16;
+        if(y+1<H){
+          if(x>0) g[i+W-1] += err*3/16;
+          g[i+W] += err*5/16;
+          if(x+1<W) g[i+W+1] += err*1/16;
+        }
+      }
+      let black = nw === 0;
+      if(inv) black = !black;
+      bits[i] = black ? 1 : 0;
+      const c = black ? 0 : 255;
+      d[i*4]=d[i*4+1]=d[i*4+2]=c; d[i*4+3]=255;
+    }
+  }
+  ctx.putImageData(id,0,0);
+}
+
+// --- print via browser ---
+$('btnPrint').onclick = () => {
+  if(!bits) return;
+  const mm = W === 384 ? '58mm' : '80mm';
+  let st = document.getElementById('pgstyle');
+  if(!st){ st = document.createElement('style'); st.id='pgstyle'; document.head.appendChild(st); }
+  st.textContent = `@media print{@page{size:${mm} auto;margin:0}#printArea img{width:${mm}}}`;
+  const img = new Image();
+  img.src = cvs.toDataURL('image/png');
+  $('printArea').innerHTML = ''; $('printArea').appendChild(img);
+  img.onload = () => setTimeout(() => window.print(), 100);
+};
+
+// --- ESC/POS ---
+function escposBytes(){
+  const wb = W/8, out = [];
+  out.push(0x1B,0x40); // init
+  out.push(0x1B,0x61,0x01); // center
+  const band = 128;
+  for(let y0=0;y0<H;y0+=band){
+    const h = Math.min(band, H-y0);
+    out.push(0x1D,0x76,0x30,0x00, wb&255, wb>>8, h&255, h>>8);
+    for(let y=y0;y<y0+h;y++){
+      for(let xb=0;xb<wb;xb++){
+        let b = 0;
+        for(let k=0;k<8;k++) b = (b<<1) | bits[y*W + xb*8 + k];
+        out.push(b);
+      }
+    }
+  }
+  out.push(0x1B,0x64,0x04); // feed 4 lines
+  return new Uint8Array(out);
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+$('btnBt').onclick = async () => {
+  try{
+    if(!navigator.bluetooth) return setStatus('Browser tidak mendukung Web Bluetooth (pakai Chrome/Edge).');
+    if(!btChar){
+      setStatus('Pilih printer Bluetooth…');
+      const dev = await navigator.bluetooth.requestDevice({
+        acceptAllDevices: true,
+        optionalServices: [
+          '000018f0-0000-1000-8000-00805f9b34fb',
+          'e7810a71-73ae-499d-8c15-faa9aef0c3f2',
+          '49535343-fe7d-4ae5-8fa9-9fafd205e455',
+          '0000ff00-0000-1000-8000-00805f9b34fb',
+          '0000ae30-0000-1000-8000-00805f9b34fb',
+          '0000fee7-0000-1000-8000-00805f9b34fb'
+        ]
+      });
+      const server = await dev.gatt.connect();
+      const services = await server.getPrimaryServices();
+      for(const s of services){
+        const chars = await s.getCharacteristics();
+        const c = chars.find(c => c.properties.write || c.properties.writeWithoutResponse);
+        if(c){ btChar = c; break; }
+      }
+      if(!btChar) return setStatus('Tidak menemukan karakteristik tulis di printer ini.');
+    }
+    const data = escposBytes();
+    const chunk = 100;
+    for(let i=0;i<data.length;i+=chunk){
+      const part = data.slice(i,i+chunk);
+      if(btChar.properties.writeWithoutResponse) await btChar.writeValueWithoutResponse(part);
+      else await btChar.writeValue(part);
+      await sleep(15);
+      if(i % 5000 === 0) setStatus(`Mengirim… ${Math.round(i/data.length*100)}%`);
+    }
+    setStatus('Selesai dikirim ke printer.');
+  }catch(e){ btChar=null; setStatus('Bluetooth gagal: '+e.message); }
+};
+
+$('btnUsb').onclick = async () => {
+  try{
+    if(!navigator.usb) return setStatus('Browser tidak mendukung WebUSB (pakai Chrome/Edge).');
+    if(!usbDev){
+      usbDev = await navigator.usb.requestDevice({filters: []});
+      await usbDev.open();
+      if(!usbDev.configuration) await usbDev.selectConfiguration(1);
+      outer: for(const itf of usbDev.configuration.interfaces){
+        for(const alt of itf.alternates){
+          const ep = alt.endpoints.find(e => e.direction === 'out' && e.type === 'bulk');
+          if(ep){ await usbDev.claimInterface(itf.interfaceNumber); usbEp = ep.endpointNumber; break outer; }
+        }
+      }
+      if(usbEp == null) { usbDev=null; return setStatus('Endpoint USB tidak ditemukan.'); }
+    }
+    const data = escposBytes();
+    for(let i=0;i<data.length;i+=4096){
+      await usbDev.transferOut(usbEp, data.slice(i,i+4096));
+    }
+    setStatus('Selesai dikirim ke printer.');
+  }catch(e){ usbDev=null; usbEp=null; setStatus('USB gagal: '+e.message+' (di Windows, driver bawaan bisa menghalangi WebUSB; pakai tombol Cetak biasa).'); }
+};
+</script>
+</body>
+</html>
